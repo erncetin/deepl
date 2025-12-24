@@ -1,0 +1,15 @@
+[project]
+name = "gradio-diffusion"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "diffusers[training]>=0.35.2",
+    "kagglehub>=0.3.13",
+    "matplotlib>=3.10.7",
+    "tokenizers>=0.22.1",
+    "torch>=2.9.0",
+    "torchvision>=0.24.0",
+    "transformers>=4.38.0",
+]
