@@ -23,7 +23,7 @@ if __name__ == "__main__":
 
     noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
     noise_scheduler = DDIMScheduler.from_config(noise_scheduler.config)
-    noise_scheduler.set_timesteps(50)
+    noise_scheduler.set_timesteps(25)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)

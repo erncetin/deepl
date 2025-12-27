@@ -12,7 +12,7 @@ from accelerate.utils import ProjectConfiguration
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 from diffusers import DDPMPipeline
-
+import matplotlib.pyplot as plt
 def make_grid(images, rows, cols):
     w, h = images[0].size
     grid = Image.new('RGB', size=(cols*w, rows*h))
@@ -20,6 +20,54 @@ def make_grid(images, rows, cols):
         grid.paste(image, box=(i%cols*w, i//cols*h))
     return grid
 
+def check_nearest_neighbors(gen_images, real_images, name, num_to_check):
+    """"
+    gen_images: Tensor of shape (B, C, 16, 16)
+    real_images: Tensor of shape (N, C, 16, 16)
+    """
+    print("Computing nearest neighbors...")
+    gen_flat = gen_images.reshape(gen_images.shape[0], - 1).cpu()  # (B, C*16*16)
+    real_flat = real_images.reshape(real_images.shape[0], -1).cpu()  # (N, C*16*16)
+
+    if gen_flat.shape[0] > num_to_check:
+        gen_flat = gen_flat[:num_to_check]
+        gen_images = gen_images[:num_to_check]
+
+    # 3. Compute pairwise Euclidean distance
+    # shape: (num_to_check, N_real_images)
+    dists = torch.cdist(gen_flat, real_flat, p=2)
+
+    # 4. Find the index of the minimum distance for each generated image
+    min_dists, min_indices = torch.min(dists, dim=1)
+
+    # 5. Plotting
+    fig, axes = plt.subplots(num_to_check, 2, figsize=(5, 2.5 * num_to_check))
+    
+    # Handle case where num_to_check is 1
+    if num_to_check == 1:
+        axes = [axes]
+
+    for i in range(num_to_check):
+        # Get the generated image
+        gen_img_np = gen_images[i].permute(1, 2, 0).cpu().numpy()
+        
+        # Get the closest real image
+        closest_real_idx = min_indices[i].item()
+        real_img_np = real_images[closest_real_idx].permute(1, 2, 0).cpu().numpy()
+
+        # Plot Generated
+        axes[i][0].imshow(gen_img_np)
+        axes[i][0].set_title("Generated")
+        axes[i][0].axis("off")
+
+        # Plot Nearest Real
+        axes[i][1].imshow(real_img_np)
+        axes[i][1].set_title(f"Nearest Real\n(Dist: {min_dists[i]:.2f})")
+        axes[i][1].axis("off")
+
+    plt.tight_layout()
+    plt.savefig(f"nearest_neighbors_check{name}.png")
+    print("Saved plot to nearest_neighbors_check.png")
 
 def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler):
     # Initialize accelerator and tensorboard logging
@@ -109,22 +157,60 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
 
                 sample_images = ((sample_images.clamp(-1, 1) + 1) * 127.5).round().type(torch.uint8)
                 sample_images = sample_images.permute(0, 2, 3, 1).cpu().numpy()
-            images = [Image.fromarray(im) for im in sample_images]
-            grid = make_grid(images, rows=4, cols=4)
-            os.makedirs(f"{config.output_dir}/samples", exist_ok=True)
-            grid.save(f"{config.output_dir}/samples/epoch_{epoch:04d}.png")
+            
 
-            # Save model
+            # Save model and create images
             if (epoch + 1) % config.save_model_epochs == 0 or epoch == config.num_epochs - 1:
                 pipeline = DDPMPipeline(unet=accelerator.unwrap_model(model), scheduler=noise_scheduler)
                 pipeline.save_pretrained(config.output_dir)
+                # save and compare sample images
+                curr_model = UNet2DConditionModel.from_pretrained("C:/Users/HP/Desktop/VSCODE_FILES/deep_learning_project/pixelart_ddpm_version4/unet", use_safetensors=True)
+                curr_model.to(device)
+                all_real_images = []
+                with torch.no_grad():
+                    for real_images, _ in tqdm(train_dataloader, desc="FID real"):
+                        real_images = real_images.to(device)
+                        real_images = ((real_images + 1) / 2).clamp(0, 1)
+                        all_real_images.append(real_images.cpu())
+
+                all_real_images = torch.cat(all_real_images, dim = 0)  # (N, C, H, W)
+                all_fake_images = []
+                with torch.no_grad():
+                    for _ in range(10):
+                        labels = torch.randint(0,
+                                                dataset.labels.max().item() + 1,
+                                                (config.eval_batch_size_fid,), 
+                                                device=device)
+                        fake_images = torch.randn((config.eval_batch_size_fid,
+                                            3,
+                                                config.image_size, 
+                                                config.image_size), 
+                                                device=device)
+                        
+                        for t in noise_scheduler.timesteps:
+                            noise_pred = curr_model(fake_images, 
+                                            t, 
+                                            class_labels=labels,
+                                            return_dict=False,
+                                            encoder_hidden_states = None)[0]
+                            fake_images = noise_scheduler.step(noise_pred,t,fake_images).prev_sample
+                        
+                        fake_images = ((fake_images.clamp(-1, 1) + 1) / 2).clamp(0, 1)
+                        all_fake_images.append(fake_images.cpu())
+
+                all_fake_images = torch.cat(all_fake_images, dim=0)
+                check_nearest_neighbors(all_fake_images, all_real_images, name=f"_epoch{epoch+1}", num_to_check=10)
+                all_fake_images = None
+                all_real_images = None
+                curr_model = None
+                
             model.train()
 
 
 if __name__ == "__main__":
     print(torch.cuda.is_available())
     print(torch.cuda.get_device_name(0))
-
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     path = "C:/Users/HP/.cache/kagglehub/datasets/ebrahimelgazar/pixel-art/versions/1"
 
     print("Path to dataset files:", path)
@@ -150,6 +236,7 @@ if __name__ == "__main__":
         block_out_channels = (64, 128, 256),
         num_class_embeds=dataset.labels.max().item() + 1,
         class_embed_type="simple",
+        dropout=0.1,
         mid_block_type = "UNetMidBlock2D",
         down_block_types=
         (
