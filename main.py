@@ -20,40 +20,66 @@ def make_grid(images, rows, cols):
         grid.paste(image, box=(i%cols*w, i//cols*h))
     return grid
 
-def check_nearest_neighbors(gen_images, real_images, name, num_to_check):
+def get_nearest_neighbors_batched(gen_images, dataloader, device):
     """"
     gen_images: Tensor of shape (B, C, 16, 16)
     real_images: Tensor of shape (N, C, 16, 16)
     """
     print("Computing nearest neighbors...")
-    gen_flat = gen_images.reshape(gen_images.shape[0], - 1).cpu()  # (B, C*16*16)
-    real_flat = real_images.reshape(real_images.shape[0], -1).cpu()  # (N, C*16*16)
+    B = gen_images.shape[0]
+    gen_flat = gen_images.reshape(B, -1).to(device)
+    
+    # Initialize "Best So Far"
+    # We start with infinite distance and empty image placeholders
+    closest_dists = torch.full((B,), float('inf'), device=device)
+    closest_images = torch.zeros_like(gen_images, device=device)
 
-    if gen_flat.shape[0] > num_to_check:
-        gen_flat = gen_flat[:num_to_check]
-        gen_images = gen_images[:num_to_check]
+    for real_batch, _ in dataloader:
+        real_batch = real_batch.to(device)
+        
+        # IMPORTANT: Normalize real images to [0,1] to match generated images
+        # Assuming your standard training loop uses [-1, 1], we convert here:
+        real_batch_norm = ((real_batch + 1) / 2).clamp(0, 1)
+        
+        real_flat = real_batch_norm.reshape(real_batch.shape[0], -1)
+        
+        # Compute distances between (Gen Images) and (Current Real Batch)
+        # Shape: (Num_Gen, Num_Real_In_Batch)
+        dists = torch.cdist(gen_flat, real_flat, p=2)
+        
+        # Find the minimum distance in this batch for each generated image
+        min_dists_batch, min_indices_batch = torch.min(dists, dim=1)
+        
+        # Check if we found a new closest match
+        better_mask = min_dists_batch < closest_dists
+        
+        # Update distances
+        closest_dists[better_mask] = min_dists_batch[better_mask]
+        
+        # Update images
+        # We find which generated images found a new best friend in this batch
+        update_indices = torch.where(better_mask)[0]
+        for idx in update_indices:
+            # Get the specific image from the real batch
+            best_match_idx = min_indices_batch[idx]
+            closest_images[idx] = real_batch_norm[best_match_idx]
 
-    # 3. Compute pairwise Euclidean distance
-    # shape: (num_to_check, N_real_images)
-    dists = torch.cdist(gen_flat, real_flat, p=2)
+    return closest_images, closest_dists
 
-    # 4. Find the index of the minimum distance for each generated image
-    min_dists, min_indices = torch.min(dists, dim=1)
-
-    # 5. Plotting
+def plot_nearest_neighbors(gen_images, real_closest_images, distances, name):
+    num_to_check = gen_images.shape[0]
     fig, axes = plt.subplots(num_to_check, 2, figsize=(5, 2.5 * num_to_check))
     
-    # Handle case where num_to_check is 1
     if num_to_check == 1:
         axes = [axes]
 
     for i in range(num_to_check):
-        # Get the generated image
+        # Generated Image
         gen_img_np = gen_images[i].permute(1, 2, 0).cpu().numpy()
         
-        # Get the closest real image
-        closest_real_idx = min_indices[i].item()
-        real_img_np = real_images[closest_real_idx].permute(1, 2, 0).cpu().numpy()
+        # Closest Real Image (Found via streaming)
+        real_img_np = real_closest_images[i].permute(1, 2, 0).cpu().numpy()
+        dist = distances[i].item()
 
         # Plot Generated
         axes[i][0].imshow(gen_img_np)
@@ -62,13 +88,14 @@ def check_nearest_neighbors(gen_images, real_images, name, num_to_check):
 
         # Plot Nearest Real
         axes[i][1].imshow(real_img_np)
-        axes[i][1].set_title(f"Nearest Real\n(Dist: {min_dists[i]:.2f})")
+        axes[i][1].set_title(f"Nearest Real\n(Dist: {dist:.2f})")
         axes[i][1].axis("off")
 
     plt.tight_layout()
     plt.savefig(f"nearest_neighbors_check{name}.png")
-    print("Saved plot to nearest_neighbors_check.png")
+    print(f"Saved plot to nearest_neighbors_check{name}.png")
 
+    
 def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler):
     # Initialize accelerator and tensorboard logging
     logging_dir = os.path.join(config.output_dir, "logs")
@@ -164,16 +191,7 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
                 pipeline = DDPMPipeline(unet=accelerator.unwrap_model(model), scheduler=noise_scheduler)
                 pipeline.save_pretrained(config.output_dir)
                 # save and compare sample images
-                curr_model = UNet2DConditionModel.from_pretrained("C:/Users/HP/Desktop/VSCODE_FILES/deep_learning_project/pixelart_ddpm_version4/unet", use_safetensors=True)
-                curr_model.to(device)
-                all_real_images = []
-                with torch.no_grad():
-                    for real_images, _ in tqdm(train_dataloader, desc="FID real"):
-                        real_images = real_images.to(device)
-                        real_images = ((real_images + 1) / 2).clamp(0, 1)
-                        all_real_images.append(real_images.cpu())
-
-                all_real_images = torch.cat(all_real_images, dim = 0)  # (N, C, H, W)
+                model.eval()
                 all_fake_images = []
                 with torch.no_grad():
                     for _ in range(10):
@@ -188,7 +206,7 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
                                                 device=device)
                         
                         for t in noise_scheduler.timesteps:
-                            noise_pred = curr_model(fake_images, 
+                            noise_pred = model(fake_images, 
                                             t, 
                                             class_labels=labels,
                                             return_dict=False,
@@ -199,10 +217,20 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
                         all_fake_images.append(fake_images.cpu())
 
                 all_fake_images = torch.cat(all_fake_images, dim=0)
-                check_nearest_neighbors(all_fake_images, all_real_images, name=f"_epoch{epoch+1}", num_to_check=10)
+                closest_real, closest_dists = get_nearest_neighbors_batched(
+                    all_fake_images, 
+                    train_dataloader, # Pass the dataloader, not a list!
+                    device=model.device
+                )
+                plot_nearest_neighbors(
+                    all_fake_images, 
+                    closest_real, 
+                    closest_dists, 
+                    name=f"_epoch{epoch+1}"
+                )
+
                 all_fake_images = None
-                all_real_images = None
-                curr_model = None
+                model.train()
                 
             model.train()
 
