@@ -63,7 +63,7 @@ if __name__ == "__main__":
                                 encoder_hidden_states = None)[0]
                 images = noise_scheduler.step(noise_pred,t,images).prev_sample
             
-            images = ((images.clamp(-1, 1) + 1) * 127.5).byte()
+            images = ((images.clamp(-1, 1) + 1) / 2).clamp(0, 1)
             fid.update(images, real=False)
 
     fid_score = fid.compute()
