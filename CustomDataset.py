@@ -34,9 +34,17 @@ class CustomDateset(Dataset):
         return len(self.x)
     
     def __getitem__(self, idx):
-        img = (self.x[idx] * 255).astype(np.uint8)
-
-        img = self.transform(img)
-        
+        image = self.x[idx]
         label = self.labels[idx]
-        return img, torch.tensor(label, dtype=torch.long)
+        
+        # Convert image to tensor, normalize, and add channel dimension
+        image = torch.from_numpy(image).float() / 255.0  # Normalize to [0, 1]
+
+        # No need to unsqueeze for RGB images:
+        image = image.permute(2, 0, 1) # Change from HxWx3 to 3xHxW (CHW)
+
+        if self.transform:
+            image = self.transform(image)
+
+
+        return image, torch.tensor(label, dtype=torch.long)

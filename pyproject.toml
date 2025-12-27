@@ -10,6 +10,8 @@ dependencies = [
     "matplotlib>=3.10.7",
     "tokenizers>=0.22.1",
     "torch>=2.9.0",
+    "torch-fidelity>=0.3.0",
+    "torchmetrics>=1.8.2",
     "torchvision>=0.24.0",
     "transformers>=4.38.0",
 ]

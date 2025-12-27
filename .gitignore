@@ -216,7 +216,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Pixelart files
-/pixelart_ddpm_version3
 /pixelart_ddpm
-/pixelart_ddpm_version2
 /deneme_pixelart_ddpm
+pixelart_ddpm*

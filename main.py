@@ -90,7 +90,7 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
             with torch.no_grad():
                 sample_labels = torch.randint(0, dataset.labels.max().item() + 1, (config.eval_batch_size,), device=model.device)
                 sample_images = torch.randn((config.eval_batch_size, 3, config.image_size, config.image_size), device=model.device)
-
+                
 
                 # DDPM reverse process
                 for t in noise_scheduler.timesteps:
@@ -99,7 +99,15 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
                         sample_images = step.prev_sample
 
                 # Convert to PIL and save
-                sample_images = ((sample_images.clamp(-1, 1) + 1) * 127.5).byte()
+                debug_imgs = sample_images.clone().detach()
+
+                print("dtype:", debug_imgs.dtype)
+                print("shape:", debug_imgs.shape)
+                print("min:", debug_imgs.min().item())
+                print("max:", debug_imgs.max().item())
+                print("mean:", debug_imgs.mean().item())
+
+                sample_images = ((sample_images.clamp(-1, 1) + 1) * 127.5).round().type(torch.uint8)
                 sample_images = sample_images.permute(0, 2, 3, 1).cpu().numpy()
             images = [Image.fromarray(im) for im in sample_images]
             grid = make_grid(images, rows=4, cols=4)
@@ -139,27 +147,25 @@ if __name__ == "__main__":
         in_channels=3,
         out_channels=3,
         layers_per_block=2,
-        block_out_channels = (32, 64, 128, 128),
+        block_out_channels = (64, 128, 256),
         num_class_embeds=dataset.labels.max().item() + 1,
-        class_embed_type="timestep",
+        class_embed_type="simple",
         mid_block_type = "UNetMidBlock2D",
         down_block_types=
         (
             "DownBlock2D",
             "AttnDownBlock2D",
-            "DownBlock2D",
             "DownBlock2D"
         ),
         up_block_types=
         (
             "UpBlock2D",
             "AttnUpBlock2D",
-            "UpBlock2D",
             "UpBlock2D"
         )
 
     )
-    
+
     # sample images shapes
     sample_image = dataset[0][0].unsqueeze(0)
     print('Input shape:', sample_image.shape)
