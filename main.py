@@ -204,16 +204,17 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
                 null_class = dataset.labels.max().item() + 1  # The "empty" label used during training dropout
 
                 with torch.no_grad():
-                    for _ in range(20):
+                    for _ in range(1):
                         labels = torch.randint(0,
                                                 dataset.labels.max().item() + 1,
-                                                (config.eval_batch_size_fid,), 
+                                                (config.eval_batch_size,), 
                                                 device=device)
+                        print(f"Batch Labels: {labels.cpu().numpy()}")
                         null_labels = torch.full_like(labels, null_class)
-                        combined_labels = torch.cat([null_labels, labels])
+                        combined_labels = torch.cat([labels, null_labels])
 
 
-                        fake_images = torch.randn((config.eval_batch_size_fid,
+                        fake_images = torch.randn((config.eval_batch_size,
                                             3,
                                                 config.image_size, 
                                                 config.image_size), 
