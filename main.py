@@ -13,6 +13,8 @@ import torch.nn.functional as F
 from tqdm.auto import tqdm
 from diffusers import DDPMPipeline
 import matplotlib.pyplot as plt
+from torch.utils.data import WeightedRandomSampler
+
 def make_grid(images, rows, cols):
     w, h = images[0].size
     grid = Image.new('RGB', size=(cols*w, rows*h))
@@ -95,7 +97,7 @@ def plot_nearest_neighbors(gen_images, real_closest_images, distances, name):
     plt.savefig(f"nearest_neighbors_check{name}.png")
     print(f"Saved plot to nearest_neighbors_check{name}.png")
 
-    
+
 def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler):
     # Initialize accelerator and tensorboard logging
     logging_dir = os.path.join(config.output_dir, "logs")
@@ -117,7 +119,7 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
     )
     
     global_step = 0
-
+    null_class = dataset.labels.max().item() + 1  # Define null class index
     # Now you train the model
     for epoch in range(config.num_epochs):
         model.train()
@@ -127,14 +129,18 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
         for step, batch in enumerate(train_dataloader):
             clean_images = batch[0]
             class_labels = batch[1]
+            
             # Sample noise to add to the images
             noise = torch.randn(clean_images.shape).to(clean_images.device)
             bs = clean_images.shape[0]
-
             # Move to device
             clean_images = clean_images.to(model.device)
             class_labels = class_labels.to(model.device)
-
+            # Create a mask where True means "drop this label" (10% probability)
+            # shape: (batch_size,)
+            dropout_mask = torch.rand(class_labels.shape[0], device=class_labels.device) < 0.1
+            training_labels = class_labels.clone()
+            training_labels[dropout_mask] = null_class
             # Sample a random timestep for each image
             timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bs,), device=clean_images.device).long()
 
@@ -144,7 +150,7 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
             
             with accelerator.accumulate(model):
                 # Predict the noise
-                noise_pred = model(noisy_images, timesteps, encoder_hidden_states = None,  class_labels=class_labels, return_dict=False)[0]
+                noise_pred = model(noisy_images, timesteps, encoder_hidden_states = None,  class_labels=training_labels, return_dict=False)[0]
                 loss = F.mse_loss(noise_pred, noise)
                 accelerator.backward(loss)
 
@@ -159,7 +165,7 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
             accelerator.log(logs, step=global_step)
             global_step += 1
 
-         # After each epoch, optionally sample demo images and save model
+        # After each epoch, optionally sample demo images and save model
         if accelerator.is_main_process:
             model.eval()
             with torch.no_grad():
@@ -193,12 +199,20 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
                 # save and compare sample images
                 model.eval()
                 all_fake_images = []
+
+                guidance_scale = 5.0   # How hard to force the label (try 3.0 to 7.0)
+                null_class = dataset.labels.max().item() + 1  # The "empty" label used during training dropout
+
                 with torch.no_grad():
-                    for _ in range(10):
+                    for _ in range(20):
                         labels = torch.randint(0,
                                                 dataset.labels.max().item() + 1,
                                                 (config.eval_batch_size_fid,), 
                                                 device=device)
+                        null_labels = torch.full_like(labels, null_class)
+                        combined_labels = torch.cat([null_labels, labels])
+
+
                         fake_images = torch.randn((config.eval_batch_size_fid,
                                             3,
                                                 config.image_size, 
@@ -206,12 +220,18 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
                                                 device=device)
                         
                         for t in noise_scheduler.timesteps:
-                            noise_pred = model(fake_images, 
+                            # Input shape becomes (2 * Batch_Size, 3, H, W)
+                            latent_model_input = torch.cat([fake_images] * 2)
+                            noise_pred = model(latent_model_input, 
                                             t, 
-                                            class_labels=labels,
+                                            class_labels=combined_labels,
                                             return_dict=False,
                                             encoder_hidden_states = None)[0]
-                            fake_images = noise_scheduler.step(noise_pred,t,fake_images).prev_sample
+                            noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
+                            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+
+                            # 9. Step with the scheduler using the guided noise
+                            fake_images = noise_scheduler.step(noise_pred, t, fake_images).prev_sample
                         
                         fake_images = ((fake_images.clamp(-1, 1) + 1) / 2).clamp(0, 1)
                         all_fake_images.append(fake_images.cpu())
@@ -223,9 +243,9 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
                     device=model.device
                 )
                 plot_nearest_neighbors(
-                    all_fake_images, 
-                    closest_real, 
-                    closest_dists, 
+                    all_fake_images[:20],
+                    closest_real[:20], 
+                    closest_dists[:20], 
                     name=f"_epoch{epoch+1}"
                 )
 
@@ -240,13 +260,28 @@ if __name__ == "__main__":
     print(torch.cuda.get_device_name(0))
     device = "cuda" if torch.cuda.is_available() else "cpu"
     path = "C:/Users/HP/.cache/kagglehub/datasets/ebrahimelgazar/pixel-art/versions/1"
-
+    # class counts for calculating class weights
+    class_counts = [8000, 32400, 6000, 35000, 8000]
     print("Path to dataset files:", path)
+    num_samples = sum(class_counts)
+    class_weights = [num_samples / c for c in class_counts]
+
+    
 
     config = TrainingConfig()
     # load data into dataloader
     dataset = CustomDateset(path + "/sprites.npy", path + "/sprites_labels.npy")
-    train_dataloader = DataLoader(dataset, batch_size = config.train_batch_size, shuffle = True, num_workers=2, pin_memory=True)
+
+    # add weights to samples
+    sample_weights = [class_weights[label] for label in dataset.labels]
+    sample_weights = torch.DoubleTensor(sample_weights)
+    sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+    train_dataloader = DataLoader(dataset,
+                                   batch_size = config.train_batch_size, 
+                                   sampler=sampler,
+                                   shuffle = False, 
+                                   num_workers=2, 
+                                   pin_memory=True)
 
     # example data batch
     for imgs, labels in train_dataloader:
@@ -255,6 +290,7 @@ if __name__ == "__main__":
         break
     print(dataset.labels.max().item() + 1)
 
+    
     # model architecture
     model = UNet2DConditionModel(
         sample_size=config.image_size,
@@ -262,8 +298,8 @@ if __name__ == "__main__":
         out_channels=3,
         layers_per_block=2,
         block_out_channels = (64, 128, 256),
-        num_class_embeds=dataset.labels.max().item() + 1,
-        class_embed_type="simple",
+        num_class_embeds=dataset.labels.max().item() + 1 + 1,
+        class_embed_type="timestep",
         dropout=0.1,
         mid_block_type = "UNetMidBlock2D",
         down_block_types=

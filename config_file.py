@@ -7,9 +7,9 @@ class TrainingConfig:
     image_size = 16  # the generated image resolution
     train_batch_size = 512  # batch size for training
     eval_batch_size = 16  # how many images to sample during evaluation in training
-    eval_batch_size_fid = 64  # how many images to sample during FID evaluation
+    eval_batch_size_fid = 20  # how many images to sample during FID evaluation
     eval_size_fid = 10000  # how many images to sample for FID evaluation
-    num_epochs = 50
+    num_epochs = 60
     gradient_accumulation_steps = 1
     learning_rate = 1e-4
     lr_warmup_steps = 500

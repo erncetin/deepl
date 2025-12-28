@@ -26,6 +26,7 @@ class CustomDateset(Dataset):
         self.transform = T.Compose([
             T.ToPILImage(),
             T.RandomHorizontalFlip(p=0.5),
+            T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
             T.ToTensor(),
             T.Normalize([0.5]*3, [0.5]*3),
         ])
